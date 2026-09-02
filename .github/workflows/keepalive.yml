@@ -1,0 +1,20 @@
+name: keepalive
+# Пингует бота на Render раз в ~10 минут, чтобы бесплатный сервис не засыпал.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render service
+        run: |
+          for i in 1 2 3; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" https://saper-game.onrender.com/ || echo 000)
+            echo "attempt $i -> $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 20
+          done
+          echo "no 200 yet (service may have been waking) — not failing the run"
+          exit 0
