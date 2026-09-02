@@ -1,0 +1,6 @@
+saper-bot.zip
+saper-bot/
+.env
+*.db
+__pycache__/
+*.pyc
