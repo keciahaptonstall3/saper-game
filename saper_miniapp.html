@@ -97,9 +97,19 @@ body{
 .stat.face .v{font-size:22px; cursor:pointer;}
 
 /* ---------- board ---------- */
-.board-shell{flex:none; display:flex; justify-content:center; align-items:center;
+.board-shell{flex:none; position:relative; display:flex; justify-content:center; align-items:center;
   padding:10px; border-radius:20px; background:linear-gradient(180deg,#10162c,#0b0f1f);
   border:1px solid #ffffff0a; box-shadow:0 10px 34px #00000055, inset 0 1px 0 #ffffff08;}
+.broke{position:absolute; inset:8px; border-radius:15px; z-index:6;
+  background:rgba(9,12,26,.9); backdrop-filter:blur(4px);
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:11px; padding:22px; text-align:center;}
+.broke-emoji{font-size:44px; line-height:1; filter:drop-shadow(0 4px 10px #f5b63d55);}
+.broke-title{font-family:"Fredoka"; font-weight:700; font-size:22px;}
+.broke-sub{color:var(--muted); font-size:13px; font-weight:700; line-height:1.5; max-width:290px;}
+.broke .btn{flex:0 0 auto; width:auto; padding:13px 22px; margin-top:4px;}
+.broke .btn:disabled{opacity:.55; cursor:default;}
+.stake-bar{text-align:center; font-family:"Fredoka"; font-weight:600; font-size:13px; color:var(--gold);
+  background:linear-gradient(180deg,#241d0f,#181509); border:1px solid #f5b63d2b; border-radius:12px; padding:9px 12px;}
 .board{display:grid; gap:3px; width:100%; grid-template-columns:repeat(var(--cols), 1fr);}
 .cell{
   aspect-ratio:1/1; border-radius:7px; display:grid; place-items:center;
@@ -229,7 +239,17 @@ body{
     <div class="stat"><div class="v" id="streakStat" style="color:var(--mint)">🔥 0</div><div class="k">серия</div></div>
   </div>
 
-  <div class="board-shell"><div class="board" id="board"></div></div>
+  <div class="board-shell">
+    <div class="board" id="board"></div>
+    <div class="broke" id="brokeBox" hidden>
+      <div class="broke-emoji">🪙</div>
+      <div class="broke-title">Не хватает монет</div>
+      <div class="broke-sub" id="brokeSub"></div>
+      <button class="btn primary" id="brokeBtn"></button>
+    </div>
+  </div>
+
+  <div class="stake-bar" id="stakeBar">🎟 Ставка за партию: 20 🪙</div>
 
   <div class="controls">
     <button class="btn flag" id="flagBtn" title="Режим флажка"><span class="em">🚩</span></button>
@@ -244,7 +264,7 @@ body{
     <button data-d="hard">Сложно</button>
   </div>
 
-  <div class="footnote">Долгий тап — поставить флажок · без реальных денег</div>
+  <div class="footnote">Тап — открыть · долгий тап — флажок · каждая партия стоит монет · без реальных денег</div>
 </div>
 
 <div class="scrim" id="resultScrim">
@@ -413,7 +433,7 @@ function readLocal(){ try{ return JSON.parse(localStorage.getItem(KEY)||'null');
 function writeLocal(o){ try{ localStorage.setItem(KEY, JSON.stringify(o)); }catch(e){} }
 function persist(){ state.t=Date.now(); writeLocal(state);
   try{ if(TG&&TG.CloudStorage) TG.CloudStorage.setItem(KEY, JSON.stringify(state)); }catch(e){} }
-const defaultState={ v:1,t:0,coins:0,xp:0,level:1,winStreak:0,bestStreak:0,
+const defaultState={ v:1,t:0,coins:150,xp:0,level:1,winStreak:0,bestStreak:0, lastEmergency:0,
   dailyStreak:0,lastDaily:'',totalGames:0,totalWins:0, muted:false,
   best:{easy:null,medium:null,hard:null}, played:{easy:0,medium:0,hard:0}, won:{easy:0,medium:0,hard:0} };
 let state=Object.assign({},defaultState,readLocal()||{});
@@ -424,7 +444,7 @@ let muted=!!state.muted;
 try{ if(TG&&TG.CloudStorage) TG.CloudStorage.getItem(KEY,(err,val)=>{ if(!err&&val){ try{ const c=JSON.parse(val);
   if(c&&(c.t||0)>(state.t||0)){ state=Object.assign({},defaultState,c);
     state.best=Object.assign({easy:null,medium:null,hard:null},state.best);
-    muted=!!state.muted; syncSoundBtn(); coinShown=state.coins; renderHUD(); checkDaily(); } }catch(e){} } }); }catch(e){}
+    muted=!!state.muted; syncSoundBtn(); coinShown=state.coins; renderHUD(); updateStakeBar(); refreshBroke(); checkDaily(); } }catch(e){} } }); }catch(e){}
 
 /* ===================== level model ===================== */
 const RANKS=[[1,'Новичок'],[3,'Сапёр'],[6,'Опытный'],[10,'Ветеран'],[15,'Эксперт'],[22,'Мастер'],[30,'Легенда']];
@@ -437,6 +457,42 @@ const DIFF={ easy:{cols:8,rows:8,mines:10,par:60,coins:50,xp:22},
   medium:{cols:9,rows:12,mines:22,par:150,coins:120,xp:48},
   hard:{cols:10,rows:14,mines:38,par:300,coins:260,xp:98} };
 let diff='easy';
+
+/* ===================== economy: entry stake ===================== */
+const STAKE={easy:20, medium:50, hard:100};   // сколько монет стоит одна партия
+const EM_COOLDOWN=20*60*1000;                 // кулдаун аварийной подачи
+function diffName(d){ return {easy:'Лёгко',medium:'Средне',hard:'Сложно'}[d]||d; }
+function setDiff(d){ diff=d;
+  [...document.getElementById('diff').children].forEach(x=>x.classList.toggle('on',x.dataset.d===d));
+  newGame(); }
+function dailyAvailable(){ const today=todayStr(); if(state.lastDaily===today) return false;
+  if(state.lastDaily && dayDiff(state.lastDaily,today)<=0) return false; return true; }
+function emReady(){ return (Date.now()-(state.lastEmergency||0))>=EM_COOLDOWN; }
+function emMins(){ return Math.max(1,Math.ceil((EM_COOLDOWN-(Date.now()-(state.lastEmergency||0)))/60000)); }
+function grantEmergency(){ const need=Math.max(0,STAKE.easy-state.coins); state.coins+=need; state.lastEmergency=Date.now();
+  persist(); renderHUD(true); haptic('coin'); S.coin(); toast('🆘 Аварийная подача +'+need); refreshBroke(); }
+function updateStakeBar(){ const el=document.getElementById('stakeBar');
+  if(el) el.textContent='🎟 Ставка за партию: '+STAKE[diff]+' 🪙'; }
+function refreshBroke(){
+  const box=document.getElementById('brokeBox'); if(!box) return;
+  const stake=STAKE[diff];
+  if(started||over||state.coins>=stake){ box.hidden=true; return; }
+  box.hidden=false;
+  const btn=document.getElementById('brokeBtn'), sub=document.getElementById('brokeSub');
+  if(state.coins>=STAKE.easy){
+    sub.textContent='На «'+diffName(diff)+'» нужно '+stake+' монет (у тебя '+state.coins+'). Сыграй полегче или подкопи.';
+    btn.textContent='🎮 Играть на «Лёгко»'; btn.disabled=false; btn.onclick=()=>{ setDiff('easy'); haptic('light'); };
+  } else if(dailyAvailable()){
+    sub.textContent='Монеты кончились. Забери ежедневный бонус!';
+    btn.textContent='🎁 Ежедневный бонус'; btn.disabled=false; btn.onclick=()=>checkDaily();
+  } else if(emReady()){
+    sub.textContent='Монеты кончились. Держи аварийную подачу — и снова в бой.';
+    btn.textContent='🆘 Аварийная подача'; btn.disabled=false; btn.onclick=grantEmergency;
+  } else {
+    sub.textContent='Монеты кончились. Аварийная подача через ~'+emMins()+' мин, или жди ежедневный бонус.';
+    btn.textContent='⏳ Подача через '+emMins()+' мин'; btn.disabled=true; btn.onclick=null;
+  }
+}
 
 /* ===================== game core ===================== */
 let grid=[], cellsEl=[], rows=0, cols=0, mines=0;
@@ -456,6 +512,7 @@ function newGame(){
     for(let c=0;c<cols;c++){ grid[r][c]={mine:false,rev:false,flag:false,adj:0};
       const el=document.createElement('div'); el.className='cell'; el.dataset.r=r; el.dataset.c=c;
       boardEl.appendChild(el); cellsEl[r][c]=el; } }
+  updateStakeBar(); refreshBroke();
 }
 function placeMines(sr,sc){
   const safe=new Set();
@@ -475,8 +532,14 @@ function reveal(r,c){ const g=grid[r][c]; if(g.rev||g.flag||over) return;
   if(g.adj>0){ el.textContent=g.adj; el.classList.add('n'+g.adj); }
   else { el.innerHTML=''; forNeighbors(r,c,(nr,nc)=>{ if(!grid[nr][nc].rev&&!grid[nr][nc].flag) reveal(nr,nc); }); } }
 
-function tap(r,c){ if(over) return; const g=grid[r][c];
-  if(!started){ placeMines(r,c); started=true; startTimer(); tgBack(true); }
+function tap(r,c){ if(over) return;
+  if(!started){
+    const stake=STAKE[diff];
+    if(state.coins<stake){ haptic('warn'); refreshBroke(); return; }
+    state.coins-=stake; persist(); renderHUD(true);   // списываем ставку в начале партии
+    placeMines(r,c); started=true; startTimer(); tgBack(true); refreshBroke();
+  }
+  const g=grid[r][c];
   if(flagMode){ toggleFlag(r,c); return; }
   if(g.flag||g.rev) return;
   if(g.mine){ reveal(r,c); return lose(r,c); }
@@ -543,7 +606,8 @@ function renderHUD(animateCoins){
 }
 function tweenCoins(from,to,el){ const start=performance.now(), dur=900, card=document.getElementById('coinsCard');
   card.classList.add('pulse'); setTimeout(()=>card.classList.remove('pulse'),500);
-  const fc=document.createElement('div'); fc.className='float-coin'; fc.textContent='+'+(to-from); card.appendChild(fc);
+  const dc=to-from; const fc=document.createElement('div'); fc.className='float-coin';
+  fc.textContent=(dc>=0?'+':'−')+Math.abs(dc); if(dc<0) fc.style.color='var(--danger)'; card.appendChild(fc);
   setTimeout(()=>fc.remove(),1000);
   (function frame(now){ const p=Math.min(1,(now-start)/dur), e=1-Math.pow(1-p,3);
     el.textContent=Math.round(from+(to-from)*e).toLocaleString('ru-RU');
@@ -582,7 +646,7 @@ function checkDaily(){ const today=todayStr(); if(state.lastDaily===today) retur
   document.getElementById('dailyScrim').classList.add('show'); tgBack(true); }
 document.getElementById('dailyClaim').onclick=()=>{ const p=window._pendingDaily;
   if(p){ state.coins+=p.amount; state.dailyStreak=p.streak; state.lastDaily=p.today;
-    persist(); reportScore(); renderHUD(true); haptic('coin'); S.daily(); burst(innerWidth/2,140,30,10); toast('🎁 +'+p.amount+' монет'); }
+    persist(); reportScore(); renderHUD(true); haptic('coin'); S.daily(); burst(innerWidth/2,140,30,10); toast('🎁 +'+p.amount+' монет'); refreshBroke(); }
   document.getElementById('dailyScrim').classList.remove('show'); tgBack(false); window._pendingDaily=null; };
 
 /* ===================== stats ===================== */
@@ -655,9 +719,9 @@ document.getElementById('rAgain').onclick=()=>{ document.getElementById('resultS
 document.getElementById('resetBtn').onclick=()=>{ if(confirm('Сбросить весь прогресс — монеты, уровень и рекорды?')){
   const m=muted; state=Object.assign({},defaultState); state.muted=m;
   state.best={easy:null,medium:null,hard:null}; state.played={easy:0,medium:0,hard:0}; state.won={easy:0,medium:0,hard:0};
-  coinShown=0; persist(); renderHUD(); document.getElementById('statsScrim').classList.remove('show'); tgBack(false); toast('Прогресс сброшен'); } };
+  coinShown=state.coins; persist(); renderHUD(); newGame(); document.getElementById('statsScrim').classList.remove('show'); tgBack(false); toast('Прогресс сброшен · старт 150 🪙'); } };
 document.getElementById('diff').addEventListener('click',e=>{ const b=e.target.closest('button[data-d]'); if(!b) return;
-  diff=b.dataset.d; [...e.currentTarget.children].forEach(x=>x.classList.toggle('on',x===b)); newGame(); haptic('light'); S.click(); });
+  setDiff(b.dataset.d); haptic('light'); S.click(); });
 document.getElementById('resultScrim').addEventListener('click',e=>{ if(e.target.id==='resultScrim'){ e.currentTarget.classList.remove('show'); tgBack(false); } });
 document.getElementById('statsScrim').addEventListener('click',e=>{ if(e.target.id==='statsScrim'){ e.currentTarget.classList.remove('show'); tgBack(started&&!over); } });
 window.addEventListener('resize',()=>{ if(!started&&!over) newGame(); });
