@@ -44,9 +44,44 @@ async def init_db() -> None:
                 best_hard  INTEGER,
                 updated_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS payments(
+                charge_id  TEXT PRIMARY KEY,
+                user_id    INTEGER,
+                coins      INTEGER,
+                stars      INTEGER,
+                claimed    INTEGER DEFAULT 0,
+                created_at TEXT
+            );
             """
         )
         await db.commit()
+
+
+async def add_payment(charge_id: str, user_id: int, coins: int, stars: int) -> bool:
+    """Записать оплату (идемпотентно по charge_id). True — если это новая оплата."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute(
+                "INSERT INTO payments(charge_id, user_id, coins, stars, created_at) VALUES(?,?,?,?,?)",
+                (charge_id, user_id, coins, stars, _now()),
+            )
+        except aiosqlite.IntegrityError:
+            return False  # уже обработана — двойного начисления не будет
+        await db.commit()
+        return True
+
+
+async def claim_payments(user_id: int) -> int:
+    """Отдать игре сумму неполученных купленных монет и пометить их полученными."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT COALESCE(SUM(coins),0) FROM payments WHERE user_id=? AND claimed=0", (user_id,)
+        )
+        total = (await cur.fetchone())[0] or 0
+        if total:
+            await db.execute("UPDATE payments SET claimed=1 WHERE user_id=? AND claimed=0", (user_id,))
+            await db.commit()
+        return int(total)
 
 
 async def add_user(user_id: int, username: Optional[str], first_name: Optional[str]) -> bool:

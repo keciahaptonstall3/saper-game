@@ -201,6 +201,17 @@ body{
 .lb-lvl{font-size:11px; color:var(--muted); font-weight:800;}
 .lb-coins{font-family:"Fredoka"; color:var(--gold); font-variant-numeric:tabular-nums; font-size:14px; flex:none;}
 .lb-empty{color:var(--muted); font-size:13px; padding:20px 8px; line-height:1.55;}
+.buy-list{display:flex; flex-direction:column; gap:9px; margin-bottom:16px;}
+.buy-item{display:flex; align-items:center; gap:10px; width:100%; cursor:pointer;
+  background:#0c1122; border:1px solid #ffffff10; border-radius:13px; padding:13px 15px;
+  color:var(--text); font-family:"Nunito"; transition:transform .1s, filter .12s;}
+.buy-item:active{transform:scale(.98); filter:brightness(1.12);}
+.buy-coins{flex:1; text-align:left; font-family:"Fredoka"; font-size:18px; color:var(--gold);}
+.buy-tag{font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.5px;
+  color:var(--mint); background:#37e0a01a; border:1px solid #37e0a044; border-radius:20px; padding:3px 9px;}
+.buy-price{font-family:"Fredoka"; font-size:16px; color:var(--cyan);}
+.coins{cursor:pointer;}
+.coins::after{content:'＋'; position:absolute; top:5px; right:8px; font-size:12px; color:#c9a94e; font-weight:800;}
 .toast{position:fixed; left:50%; bottom:calc(20px + env(safe-area-inset-bottom));
   transform:translate(-50%,120%); background:var(--surface2); border:1px solid #ffffff18; color:var(--text);
   font-weight:800; font-size:14px; padding:11px 18px; border-radius:30px; z-index:90;
@@ -325,6 +336,16 @@ body{
   </div>
 </div>
 
+<div class="scrim" id="buyScrim">
+  <div class="sheet">
+    <div class="big">💫</div>
+    <h2>Купить монеты</h2>
+    <p>Оплата через Telegram Stars ⭐</p>
+    <div class="buy-list" id="buyList"></div>
+    <button class="btn primary" id="buyClose"><span class="em">👍</span> Закрыть</button>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -363,6 +384,45 @@ function reportScore(){
         wins:state.totalWins, best:state.best }) })
     .then(r=>r.ok?r.json():null).then(d=>{ if(d&&d.rank){ state._rank=d.rank; state._total=d.total; } })
     .catch(()=>{}); }catch(e){} }
+
+/* покупка монет за Telegram Stars */
+const COIN_PACKS=[
+  {id:'small',  coins:200,  stars:25},
+  {id:'medium', coins:600,  stars:60,  tag:'популярно'},
+  {id:'large',  coins:1500, stars:120, tag:'выгодно'},
+];
+function openBuy(){ const s=document.getElementById('buyScrim'), list=document.getElementById('buyList');
+  s.classList.add('show'); tgBack(true); S.click();
+  if(!BACKEND_URL||!TG){ list.innerHTML='<div class="lb-empty">Покупка монет доступна только внутри Telegram (через бота).</div>'; return; }
+  list.innerHTML=COIN_PACKS.map(p=>'<button class="buy-item" data-pack="'+p.id+'">'+
+    '<span class="buy-coins">🪙 '+p.coins.toLocaleString('ru-RU')+'</span>'+
+    (p.tag?'<span class="buy-tag">'+p.tag+'</span>':'')+
+    '<span class="buy-price">'+p.stars+' ⭐</span></button>').join('');
+}
+function buyPack(id){
+  if(!BACKEND_URL||!TG){ toast('Покупки доступны в Telegram'); return; }
+  if(!TG.openInvoice){ toast('Обнови Telegram для оплаты ⭐'); return; }
+  toast('Готовим счёт…');
+  fetch(apiBase()+'/api/create-invoice',{ method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ initData:TG.initData, pack:id }) })
+   .then(r=>r.ok?r.json():null).then(d=>{
+     if(!d||!d.link){ toast('Не удалось создать счёт'); return; }
+     TG.openInvoice(d.link, status=>{
+       if(status==='paid'){ document.getElementById('buyScrim').classList.remove('show'); claimPurchases(true); }
+       else if(status==='failed') toast('Оплата не прошла');
+       else if(status==='cancelled') toast('Оплата отменена');
+     });
+   }).catch(()=>toast('Ошибка сети'));
+}
+function claimPurchases(withToast){
+  if(!BACKEND_URL||!TG||!TG.initData) return;
+  fetch(apiBase()+'/api/claim',{ method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ initData:TG.initData }) })
+   .then(r=>r.ok?r.json():null).then(d=>{
+     if(d&&d.coins>0){ state.coins+=d.coins; persist(); reportScore(); renderHUD(true); refreshBroke();
+       haptic('coin'); S.coin(); burst(innerWidth/2,120,30,10); toast('💫 Начислено +'+d.coins+' монет'); }
+   }).catch(()=>{});
+}
 
 /* ===================== Sound engine (Web Audio, synthesized) ===================== */
 let AC=null;
@@ -716,6 +776,10 @@ document.getElementById('statsClose').onclick=()=>{ document.getElementById('sta
 document.getElementById('lbOpen').onclick=()=>{ document.getElementById('statsScrim').classList.remove('show'); openLeaderboard(); };
 document.getElementById('lbClose').onclick=()=>{ document.getElementById('lbScrim').classList.remove('show'); tgBack(started&&!over); S.click(); };
 document.getElementById('lbScrim').addEventListener('click',e=>{ if(e.target.id==='lbScrim'){ e.currentTarget.classList.remove('show'); tgBack(started&&!over); } });
+document.getElementById('coinsCard').onclick=openBuy;
+document.getElementById('buyList').addEventListener('click',e=>{ const b=e.target.closest('.buy-item'); if(b) buyPack(b.dataset.pack); });
+document.getElementById('buyClose').onclick=()=>{ document.getElementById('buyScrim').classList.remove('show'); tgBack(started&&!over); S.click(); };
+document.getElementById('buyScrim').addEventListener('click',e=>{ if(e.target.id==='buyScrim'){ e.currentTarget.classList.remove('show'); tgBack(started&&!over); } });
 document.getElementById('rAgain').onclick=()=>{ document.getElementById('resultScrim').classList.remove('show'); newGame(); S.click(); };
 document.getElementById('resetBtn').onclick=()=>{ if(confirm('Сбросить весь прогресс — монеты, уровень и рекорды?')){
   const m=muted; state=Object.assign({},defaultState); state.muted=m;
@@ -728,7 +792,7 @@ document.getElementById('statsScrim').addEventListener('click',e=>{ if(e.target.
 window.addEventListener('resize',()=>{ if(!started&&!over) newGame(); });
 
 /* ===================== boot ===================== */
-syncSoundBtn(); renderHUD(); newGame(); checkDaily();
+syncSoundBtn(); renderHUD(); newGame(); checkDaily(); claimPurchases(true);
 window.__saper={get state(){return state;}, DIFF, streakMult, xpNeeded, dailyReward}; // test hook
 </script>
 </body>

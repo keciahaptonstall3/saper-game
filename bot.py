@@ -33,19 +33,29 @@ from aiohttp import web
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram import F
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LabeledPrice,
     Message,
     MenuButtonWebApp,
+    PreCheckoutQuery,
     WebAppInfo,
 )
 from aiogram.utils.web_app import safe_parse_webapp_init_data
 
 import db
+
+# Пакеты монет за Telegram Stars (валюта XTR). coins — сколько начислим, stars — цена.
+PACKS = {
+    "small":  {"coins": 200,  "stars": 25,  "title": "200 монет"},
+    "medium": {"coins": 600,  "stars": 60,  "title": "600 монет"},
+    "large":  {"coins": 1500, "stars": 120, "title": "1500 монет"},
+}
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBAPP_URL = os.getenv("WEBAPP_URL")
@@ -63,6 +73,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("saper-bot")
 dp = Dispatcher()
 BOT_USERNAME = ""  # заполнится при старте
+BOT = None         # ссылка на экземпляр бота (для API-эндпоинтов)
 
 
 def game_keyboard() -> InlineKeyboardMarkup:
@@ -239,6 +250,49 @@ async def api_leaderboard(request: web.Request) -> web.Response:
     return web.json_response({"top": rows, "total": total})
 
 
+async def api_create_invoice(request: web.Request) -> web.Response:
+    """Игра просит счёт на покупку монет за Telegram Stars. Возвращаем ссылку на оплату."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    try:
+        parsed = safe_parse_webapp_init_data(BOT_TOKEN, data.get("initData", ""))
+    except Exception:
+        return web.json_response({"error": "bad signature"}, status=403)
+    user = parsed.user
+    if not user:
+        return web.json_response({"error": "no user"}, status=403)
+    pack = PACKS.get(str(data.get("pack", "")))
+    if not pack:
+        return web.json_response({"error": "bad pack"}, status=400)
+    link = await BOT.create_invoice_link(
+        title="Сапёр — " + pack["title"],
+        description=f'{pack["coins"]} игровых монет для игры «Сапёр»',
+        payload=f'{data.get("pack")}:{user.id}',
+        currency="XTR",  # Telegram Stars — provider_token не нужен
+        prices=[LabeledPrice(label=pack["title"], amount=pack["stars"])],
+    )
+    return web.json_response({"link": link})
+
+
+async def api_claim(request: web.Request) -> web.Response:
+    """Игра забирает купленные монеты (начисленные сервером после оплаты)."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    try:
+        parsed = safe_parse_webapp_init_data(BOT_TOKEN, data.get("initData", ""))
+    except Exception:
+        return web.json_response({"error": "bad signature"}, status=403)
+    user = parsed.user
+    if not user:
+        return web.json_response({"error": "no user"}, status=403)
+    coins = await db.claim_payments(user.id)
+    return web.json_response({"ok": True, "coins": coins})
+
+
 async def api_health(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
@@ -247,11 +301,41 @@ def make_app(bot: Bot) -> web.Application:
     app = web.Application(middlewares=[cors_mw])
     app.router.add_post("/api/score", api_score)
     app.router.add_get("/api/leaderboard", api_leaderboard)
+    app.router.add_post("/api/create-invoice", api_create_invoice)
+    app.router.add_post("/api/claim", api_claim)
     app.router.add_get("/", api_health)
     # OPTIONS-префлайты
-    app.router.add_route("OPTIONS", "/api/score", lambda r: web.Response())
-    app.router.add_route("OPTIONS", "/api/leaderboard", lambda r: web.Response())
+    for path in ("/api/score", "/api/leaderboard", "/api/create-invoice", "/api/claim"):
+        app.router.add_route("OPTIONS", path, lambda r: web.Response())
     return app
+
+
+# ------------------------- оплата Telegram Stars -------------------------
+
+@dp.pre_checkout_query()
+async def on_pre_checkout(query: PreCheckoutQuery) -> None:
+    # Подтверждаем счёт (обязательно ответить в течение 10 секунд).
+    await query.answer(ok=True)
+
+
+@dp.message(F.successful_payment)
+async def on_successful_payment(message: Message) -> None:
+    sp = message.successful_payment
+    try:
+        pack_id, uid = sp.invoice_payload.split(":")
+        uid = int(uid)
+    except Exception:
+        pack_id, uid = "", message.from_user.id
+    pack = PACKS.get(pack_id)
+    coins = pack["coins"] if pack else 0
+    # Идемпотентно по charge_id — повторная доставка апдейта не начислит дважды.
+    is_new = await db.add_payment(sp.telegram_payment_charge_id, uid, coins, sp.total_amount)
+    if is_new and coins:
+        await message.answer(
+            f"✅ Оплата прошла! Начислено <b>{coins}</b> монет 🪙\n"
+            "Открой игру — они уже на балансе.",
+            reply_markup=game_keyboard(),
+        )
 
 
 # ------------------------- планировщик напоминаний -------------------------
@@ -281,9 +365,10 @@ async def reminder_loop(bot: Bot) -> None:
 # ------------------------- запуск -------------------------
 
 async def main() -> None:
-    global BOT_USERNAME
+    global BOT_USERNAME, BOT
     await db.init_db()
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    BOT = bot
 
     me = await bot.get_me()
     BOT_USERNAME = me.username
